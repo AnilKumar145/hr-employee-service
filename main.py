@@ -24,6 +24,3 @@ def get_employee_by_id(employee_id: str):
         if emp.employee_id == employee_id:
             return emp
     raise HTTPException(status_code=404, detail="Employee not found")
-@app.get("/employees/count")
-def count_employees():
-    return {"total_employees": len(employee_db)}
