@@ -90,3 +90,7 @@ def resign_employee(employee_id: str, current_user: User = Depends(get_current_a
             return {"message": f"Employee {employee_id} marked as resigned"}
     # If employee not found, return 404 error
     raise HTTPException(status_code=404, detail="Employee not found")
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to HR Employee Service API", "docs": "/docs"}
