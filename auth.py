@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import Depends, HTTPException, status, Security, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+import secrets
 
 # Security settings
 # SECRET_KEY: Used for signing JWT tokens - should be kept secret in production
@@ -12,13 +13,43 @@ from pydantic import BaseModel
 # ACCESS_TOKEN_EXPIRE_MINUTES: Controls how long tokens remain valid
 SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"  # Change in production
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours instead of 30 minutes
 
 # Password hashing
 # pwd_context: Handles password hashing and verification using bcrypt
 # oauth2_scheme: FastAPI dependency that extracts the JWT token from the Authorization header
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="login",
+    auto_error=False  # Don't auto-raise errors for missing tokens
+)
+http_bearer = HTTPBearer()
+
+# Add HTTP Basic Auth
+security = HTTPBasic()
+
+# Function to validate HTTP Basic Auth credentials
+async def get_current_user_basic(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, "admin")
+    correct_password = secrets.compare_digest(credentials.password, "adminpassword")
+    
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    
+    # Return the user from the database
+    user = get_user(fake_users_db, username=credentials.username)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    
+    return user
 
 # Models
 # Token: Response model for successful authentication
@@ -127,7 +158,75 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
+# Function to get current user from token (JWT)
+async def get_current_user_from_token(
+    request: Request,
+    token: str = Depends(oauth2_scheme)
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    # If no token in header, try to get from cookie or session
+    if not token:
+        token = request.cookies.get("access_token")
+        if not token and "session" in request.scope:
+            try:
+                token = request.session.get("access_token")
+            except Exception:
+                pass
+    
+    if not token:
+        raise credentials_exception
+        
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+        
+    user = get_user(fake_users_db, username=username)
+    if user is None:
+        raise credentials_exception
+    return user
 
+# Function to get current user from bearer token
+def get_current_user_from_bearer(
+    credentials: HTTPAuthorizationCredentials = Security(http_bearer)
+):
+    """
+    Get current user using HTTP Bearer token
+    """
+    return _process_token(credentials.credentials)
+
+def _process_token(token: str):
+    """
+    Process the token and return the user
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        # Decode the JWT token
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        # Handle invalid tokens
+        raise credentials_exception
+    # Get the user from the database
+    user = get_user(fake_users_db, username=token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
 
 
 
