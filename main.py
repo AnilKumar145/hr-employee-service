@@ -11,7 +11,7 @@ app = FastAPI(title="HR_Employee Service")
 # In-memory database with 1000 fake employees
 employee_db: List[Employee] = [Employee(**data) for data in generate_employees(1000)]
 
-# Registration endpoint
+# Public endpoints (no authentication required)
 @app.post("/register", response_model=User, status_code=status.HTTP_201_CREATED)
 async def register_user(user_data: UserCreate):
     from auth import fake_users_db
@@ -38,9 +38,8 @@ async def register_user(user_data: UserCreate):
         "disabled": False
     }
 
-# Authentication endpoint
 @app.post("/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     from auth import fake_users_db, ACCESS_TOKEN_EXPIRE_MINUTES
     user = authenticate_user(fake_users_db, form_data.username, form_data.password)
     if not user:
@@ -55,7 +54,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Protected routes
+# Protected routes - all require valid token
 @app.post("/employees", response_model=Employee)
 def add_employee(employee: Employee, current_user: User = Depends(get_current_active_user)):
     employee_db.append(employee)
