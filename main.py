@@ -1,12 +1,13 @@
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import json
 import os
-from fastapi import FastAPI, Depends, HTTPException, status, Security, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, status, Security, Request, Response, Body
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel, Field
 # Import only the models that exist in your models.py file
 from models import Employee, StatusType, EmploymentType
 from auth import (
@@ -22,10 +23,44 @@ oauth2_scheme = OAuth2PasswordBearer(
     auto_error=False  # Don't auto-raise errors for missing tokens
 )
 
-# Initialize FastAPI app with Swagger UI configuration
+# Define enhanced response models
+class EmployeeCreateResponse(BaseModel):
+    message: str
+    employee_id: str
+    details: Employee
+    timestamp: str
+
+class EmployeeDepartmentChangeResponse(BaseModel):
+    message: str
+    changes: Dict[str, str]
+    employee_id: str
+    details: Employee
+    timestamp: str
+
+class EmployeeResignResponse(BaseModel):
+    message: str
+    employee_id: str
+    employment_duration: str
+    last_department: str
+    last_role: str
+    resignation_date: str
+    details: Employee
+    timestamp: str
+
+# Initialize FastAPI app with Swagger UI configuration and documentation
 app = FastAPI(
     title="HR Employee Service",
-    description="API for HR employee management",
+    description="""
+    API for HR employee management
+    
+    ## Authentication
+    
+    Use the following credentials to access the API:
+    - Username: admin
+    - Password: adminpassword
+    
+    First use the /login endpoint or the Authorize button to get a token.
+    """,
     swagger_ui_parameters={"persistAuthorization": True}  # Keep authorization between refreshes
 )
 
@@ -56,6 +91,33 @@ def load_employees():
 
 # Initialize employees data
 employees_db = load_employees()
+
+# Function to convert existing employee data to new format
+def convert_employee_data():
+    for employee in employees_db:
+        if "name" in employee and "first_name" not in employee:
+            # Split name into first_name and last_name
+            name_parts = employee["name"].split(" ", 1)
+            employee["first_name"] = name_parts[0]
+            employee["last_name"] = name_parts[1] if len(name_parts) > 1 else ""
+            del employee["name"]
+            
+        # Convert address to separate fields
+        if "address" in employee:
+            address_parts = employee["address"].split(", ", 3)
+            employee["street"] = address_parts[0] if len(address_parts) > 0 else ""
+            employee["city"] = address_parts[1] if len(address_parts) > 1 else ""
+            state_zip = address_parts[2].split(" ", 1) if len(address_parts) > 2 else ["", ""]
+            employee["state"] = state_zip[0]
+            employee["country"] = "USA"  # Default country
+            del employee["address"]
+            
+        # Convert is_active to 0/1
+        if "is_active" in employee and isinstance(employee["is_active"], bool):
+            employee["is_active"] = 1 if employee["is_active"] else 0
+
+# Convert existing data when app starts
+convert_employee_data()
 
 # Employee data access functions
 def get_employees(skip: int = 0, limit: int = 100):
@@ -207,7 +269,7 @@ async def get_current_user_with_global_fallback(
     # ... (you would typically validate the token here)
 
 # Protected endpoint that accepts JWT token authentication
-@app.get("/employees/", response_model=List[dict])
+@app.get("/employees/", response_model=List[Employee])
 async def read_employees(
     current_user: User = Depends(get_current_user_from_token),
     skip: int = 0, 
@@ -218,10 +280,10 @@ async def read_employees(
     This endpoint uses JWT token authentication.
     """
     employees = get_employees(skip=skip, limit=limit)
-    return employees
+    return [Employee.model_validate(emp) for emp in employees]
 
 # Get a specific employee by ID
-@app.get("/employees/{employee_id}", response_model=dict)
+@app.get("/employees/{employee_id}", response_model=Employee)
 async def read_employee(
     employee_id: str,
     current_user: User = Depends(get_current_user_from_token)
@@ -230,41 +292,114 @@ async def read_employee(
     employee = get_employee_by_id(employee_id)
     if employee is None:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return employee
+    return Employee.model_validate(employee)
 
 # Create a new employee
-@app.post("/employees/", response_model=dict)
+@app.post("/employees/", response_model=EmployeeCreateResponse)
 async def create_new_employee(
-    employee: dict,
+    employee: Employee,
     current_user: User = Depends(get_current_user_from_token)
 ):
     """Create a new employee"""
-    return create_employee(employee)
+    # Convert Pydantic model to dict
+    employee_dict = employee.model_dump()
+    
+    # Ensure is_active is 0 or 1, not boolean
+    if isinstance(employee_dict["is_active"], bool):
+        employee_dict["is_active"] = 1 if employee_dict["is_active"] else 0
+        
+    # Create the employee
+    new_employee = create_employee(employee_dict)
+    
+    # Return enhanced response
+    return EmployeeCreateResponse(
+        message=f"✅ Employee {new_employee['first_name']} {new_employee['last_name']} created successfully!",
+        employee_id=new_employee["employee_id"],
+        details=Employee.model_validate(new_employee),
+        timestamp=datetime.now().isoformat()
+    )
 
-# Update an existing employee
-@app.put("/employees/{employee_id}", response_model=dict)
-async def update_existing_employee(
+
+# Update an existing employee's department
+@app.put("/employees/{employee_id}/change-department", response_model=EmployeeDepartmentChangeResponse)
+async def update_employee_department(
     employee_id: str,
-    employee: dict,
+    department: str = Body(..., embed=True),
     current_user: User = Depends(get_current_user_from_token)
 ):
-    """Update an existing employee"""
-    updated_employee = update_employee(employee_id, employee)
+    """Update an employee's department"""
+    # Find the employee
+    employee = get_employee_by_id(employee_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    # Store old department for response
+    old_department = employee["department"]
+    
+    # Update only the department field
+    employee_update = {"department": department}
+    
+    # Update the employee
+    updated_employee = update_employee(employee_id, employee_update)
     if updated_employee is None:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return updated_employee
+    
+    # Return enhanced response
+    return EmployeeDepartmentChangeResponse(
+        message=f"🔄 Department changed successfully for {updated_employee['first_name']} {updated_employee['last_name']}!",
+        changes={
+            "from": old_department,
+            "to": department
+        },
+        employee_id=employee_id,
+        details=Employee.model_validate(updated_employee),
+        timestamp=datetime.now().isoformat()
+    )
 
-# Delete an employee
-@app.delete("/employees/{employee_id}", response_model=dict)
-async def delete_existing_employee(
+# Resign an employee using PUT method
+@app.put("/employees/{employee_id}/resign", response_model=EmployeeResignResponse)
+async def resign_employee(
     employee_id: str,
     current_user: User = Depends(get_current_user_from_token)
 ):
-    """Delete an employee"""
-    success = delete_employee(employee_id)
-    if not success:
+    """Resign an employee (change status to Resigned and is_active to 0)"""
+    # Find the employee
+    employee = get_employee_by_id(employee_id)
+    if employee is None:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return {"message": f"Employee {employee_id} deleted successfully"}
+    
+    # Calculate employment duration
+    start_date = datetime.strptime(employee["start_date"], "%Y-%m-%d")
+    end_date = datetime.now(timezone.utc)
+    duration_days = (end_date.date() - start_date.date()).days
+    years = duration_days // 365
+    months = (duration_days % 365) // 30
+    days = (duration_days % 365) % 30
+    
+    # Update status to Resigned and is_active to 0
+    employee_update = {
+        "status": "Resigned",
+        "is_active": 0,
+        "end_date": end_date.strftime("%Y-%m-%d")
+    }
+    
+    # Update the employee
+    updated_employee = update_employee(employee_id, employee_update)
+    if updated_employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    # Return enhanced response
+    return EmployeeResignResponse(
+        message=f"👋 {updated_employee['first_name']} {updated_employee['last_name']} has resigned!",
+        employee_id=employee_id,
+        employment_duration=f"{years} years, {months} months, {days} days",
+        last_department=updated_employee["department"],
+        last_role=updated_employee["role"],
+        resignation_date=end_date.strftime("%Y-%m-%d"),
+        details=Employee.model_validate(updated_employee),
+        timestamp=datetime.now().isoformat()
+    )
+
 
 # Endpoint to get the current token (for debugging)
 @app.get("/current-token")
@@ -282,3 +417,4 @@ async def get_current_token(request: Request):
         "cookie_token": token,
         "session_token": session_token
     }
+
